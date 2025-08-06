@@ -1,5 +1,5 @@
-﻿# Define log file
-$logFile = "<path to log>"
+# Define log file
+$logFile = "C:\UserRemovalTool\UserOffboarding.log"
 
 function Log {
     param ([string]$message)
@@ -10,6 +10,7 @@ function Log {
 
 # Prompt for username
 $username = Read-Host "Enter the username (UPN or sAMAccountName)"
+$domain = "kearnycountyhospital.com"
 Log "Starting offboarding for user: $username"
 
 # Connect to Microsoft Graph
@@ -32,7 +33,7 @@ try {
 
 # Get user objects
 try {
-    $cloudUser = Get-MgUser -UserId "$username@<yourdomain>.com"
+    $cloudUser = Get-MgUser -UserId "$username@$domain"
     $onPremUser = Get-ADUser -Identity $username -Properties MemberOf
     Log "Retrieved user objects from Graph and on-prem AD."
 } catch {
@@ -40,65 +41,81 @@ try {
     exit
 }
 
-# Remove licenses
+# Get all Azure AD groups the user is a member of
+try {
+    $groups = Get-MgUserMemberOf -UserId $cloudUser.Id
+} catch {
+    Log "ERROR: Failed to retrieve Azure AD group memberships. $_"
+    $groups = @()
+}
+
+# Attempt to remove user from licensing groups
+foreach ($group in $groups) {
+    if ($group.AdditionalProperties["@odata.type"] -eq "#microsoft.graph.group") {
+        $groupId = $group.Id
+        try {
+            $licenseDetails = Get-MgGroupLicenseDetail -GroupId $groupId
+            if ($licenseDetails.SkuId.Count -gt 0) {
+                $groupDetails = Get-MgGroup -GroupId $groupId
+                Log "User is in a licensing group: $($groupDetails.DisplayName)"
+                try {
+                    Remove-MgGroupMemberByRef -GroupId $groupId -DirectoryObjectId $cloudUser.Id
+                    Log "Removed user from licensing group: $($groupDetails.DisplayName)"
+                } catch {
+                    Log "ERROR: Could not remove user from licensing group $($groupDetails.DisplayName): $($_.Exception.Message)"
+                }
+            }
+        } catch {
+            # Group has no license detail or access denied
+            continue
+        }
+    }
+}
+
+# Attempt to remove directly assigned licenses
 try {
     $assignedLicenses = Get-MgUserLicenseDetail -UserId $cloudUser.Id
     $skuIds = $assignedLicenses.SkuId
     if ($skuIds.Count -gt 0) {
         $removeLicenses = @{ "AddLicenses" = @(); "RemoveLicenses" = $skuIds }
         Set-MgUserLicense -UserId $cloudUser.Id -BodyParameter $removeLicenses
-        Log "Removed all assigned licenses."
+        Log "Removed all directly assigned licenses."
     } else {
-        Log "No licenses found to remove."
+        Log "No directly assigned licenses found to remove."
     }
 } catch {
-    Log "ERROR: Failed to remove licenses. $_"
+    Log "ERROR: Failed to remove directly assigned licenses. $_"
 }
 
-# Remove from Azure AD groups (skip mail-enabled, on-prem synced, and unauthorized)
-try {
-    $groups = Get-MgUserMemberOf -UserId $cloudUser.Id
-    foreach ($group in $groups) {
-        if ($group.AdditionalProperties["@odata.type"] -eq "#microsoft.graph.group") {
-            $groupId = $group.Id
-            $groupDetails = Get-MgGroup -GroupId $groupId
+# Remove from Azure AD groups (skip mail-enabled and synced groups)
+foreach ($group in $groups) {
+    if ($group.AdditionalProperties["@odata.type"] -eq "#microsoft.graph.group") {
+        $groupId = $group.Id
+        $groupDetails = Get-MgGroup -GroupId $groupId
 
-            # Skip mail-enabled security groups
-            if ($groupDetails.MailEnabled -and $groupDetails.SecurityEnabled) {
-                Log "Skipped mail-enabled security group: $($groupDetails.DisplayName)"
-                continue
-            }
+        if ($groupDetails.MailEnabled -and $groupDetails.SecurityEnabled) {
+            Log "Skipped mail-enabled security group: $($groupDetails.DisplayName)"
+            continue
+        }
 
-            # Skip on-prem synced groups
-            if ($groupDetails.OnPremisesSyncEnabled -eq $true) {
-                Log "Skipped on-prem synced group: $($groupDetails.DisplayName)"
-                continue
-            }
+        if ($groupDetails.OnPremisesSyncEnabled -eq $true) {
+            Log "Skipped on-prem synced group: $($groupDetails.DisplayName)"
+            continue
+        }
 
-            # Attempt removal with error handling
-            try {
-                Remove-MgGroupMemberByRef -GroupId $groupId -DirectoryObjectId $cloudUser.Id
-                Log "Removed from Azure AD group: $($groupDetails.DisplayName)"
-            } catch {
-                $errorMessage = $_.Exception.Message
-                switch -Wildcard ($errorMessage) {
-                    "*Insufficient privileges*" {
-                        Log "Skipped group due to insufficient privileges: $($groupDetails.DisplayName)"
-                    }
-                    "*Authorization_RequestDenied*" {
-                        Log "Skipped group due to authorization denial: $($groupDetails.DisplayName)"
-                    }
-                    default {
-                        Log "ERROR: Failed to remove from group $($groupDetails.DisplayName): $errorMessage"
-                    }
-                }
+        try {
+            Remove-MgGroupMemberByRef -GroupId $groupId -DirectoryObjectId $cloudUser.Id
+            Log "Removed from Azure AD group: $($groupDetails.DisplayName)"
+        } catch {
+            $errorMessage = $_.Exception.Message
+            if ($errorMessage -like "*Insufficient privileges*" -or $errorMessage -like "*Authorization_RequestDenied*") {
+                Log "Skipped group due to insufficient privileges: $($groupDetails.DisplayName)"
+            } else {
+                Log "ERROR: Failed to remove from group $($groupDetails.DisplayName): $errorMessage"
             }
         }
     }
-} catch {
-    Log "ERROR: Failed to enumerate Azure AD groups. $_"
 }
-
 
 # Remove from on-prem AD groups
 try {
@@ -129,11 +146,11 @@ try {
 # Connect to on-prem Exchange server
 try {
     $session = New-PSSession -ConfigurationName Microsoft.Exchange `
-        -ConnectionUri http://<your_exchange_server>/PowerShell/ `
+        -ConnectionUri http://bumblebee.kearny.local/PowerShell/ `
         -Authentication Kerberos
 
     Import-PSSession $session -DisableNameChecking -AllowClobber
-    Log "Connected to on-prem Exchange server: <your_exchange_server>"
+    Log "Connected to on-prem Exchange server: bumblebee.kearny.local"
 } catch {
     Log "ERROR: Failed to connect to on-prem Exchange server. $_"
 }
@@ -151,5 +168,3 @@ try {
 } catch {
     Log "ERROR: Failed to remove from on-prem Exchange distribution lists. $_"
 }
-
-
