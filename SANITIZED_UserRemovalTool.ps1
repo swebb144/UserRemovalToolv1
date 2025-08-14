@@ -168,3 +168,6 @@ try {
 } catch {
     Log "ERROR: Failed to remove from on-prem Exchange distribution lists. $_"
 }
+
+#Sync AD
+    Start-ADSyncSyncCycle -PolicyType Delta
