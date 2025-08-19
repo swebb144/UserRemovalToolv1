@@ -1,13 +1,3 @@
-
-#Hide console window
-Add-Type -Name Win32ShowWindow -Namespace Win32Functions -MemberDefinition '
-    [DllImport("user32.dll")]
-    public static extern bool ShowWindow(int handle, int state);
-'
-$consolePtr = (Get-Process -Id $PID).MainWindowHandle
-[Win32Functions.Win32ShowWindow]::ShowWindow($consolePtr, 0)  # 0 = Hide
-
-
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
@@ -233,3 +223,4 @@ $button.Add_Click({
 
 # Show GUI
 [void]$form.ShowDialog()
+
